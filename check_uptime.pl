@@ -8,11 +8,11 @@ use Net::SSH::Expect;
 use Text::CSV;
 
 # SNMP details
-my $community = "ks2020rm";
+my $community = "community";
 my $oid = "iso.3.6.1.2.1.1.3.0";
 
 # Email details
-my $sender = 'peter.hendlinger@karcher.com';
+my $sender = 'sender@sender.com';
 my @recipients = (
     'user1@domain.com',
     'user2@domain.com',
