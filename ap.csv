@@ -1,6 +1,6 @@
 Index,Switch IP,Device ID,AP Type,IP Address,Interface
-1,10.84.13.9,kae-ap-vnqnm001-019,C9120AXE-S,10.84.13.204,GigabitEthernet4/0/43
-2,10.84.13.9,kae-ap-vnqnm001-008,C9120AXI-S,10.84.13.147,GigabitEthernet3/0/45
-3,10.84.13.9,kae-ap-vnqnm001-009,C9120AXI-S,10.84.13.198,GigabitEthernet3/0/46
-4,10.84.13.9,kae-ap-vnqnm001-028,C9120AXE-S,10.84.13.227,GigabitEthernet3/0/42
-5,10.84.13.9,kae-ap-vnqnm001-022,C9120AXE-S,10.84.13.148,GigabitEthernet2/0/42
+1,10.84.13.9,kun-ap-vnqnm001-019,C9120AXE-S,10.84.13.204,GigabitEthernet4/0/43
+2,10.84.13.9,kun-ap-vnqnm001-008,C9120AXI-S,10.84.13.147,GigabitEthernet3/0/45
+3,10.84.13.9,kun-ap-vnqnm001-009,C9120AXI-S,10.84.13.198,GigabitEthernet3/0/46
+4,10.84.13.9,kun-ap-vnqnm001-028,C9120AXE-S,10.84.13.227,GigabitEthernet3/0/42
+5,10.84.13.10,kun-ap-vnqnm001-001,C9120AXE-S,10.84.13.148,GigabitEthernet2/0/42
