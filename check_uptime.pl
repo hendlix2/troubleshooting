@@ -4,46 +4,46 @@ use strict;
 use warnings;
 use POSIX qw(strftime);
 use MIME::Lite;
-use Net::SSH::Expect;
+use Net::SSH2::Cisco;
 use Text::CSV;
+use JSON;
+use File::Slurp;  # To read the JSON file
 
 # SNMP details
 my $community = "community";
 my $oid = "iso.3.6.1.2.1.1.3.0";
 
 # Email details
-my $sender = 'sender@sender.com';
-my @recipients = (
-    'user1@domain.com',
-    'user2@domain.com',
-);
+my $sender = 'peter.hendlinger@domain.com';
+my @recipients = ('peter@domain1.com','peter@domain2.de');
 my $subject = "Alert: Device Uptime Less Than 10 Minutes";
 my $test_subject = "Daily Test Email: Device Uptime Check";
 my $unreachable_subject = "Alert: Multiple Devices Not Reachable";
 
-# List of devices (IP addresses or hostnames)
-my @devices = (
-    "1.1.1.1",
-    "2.2.2.2",
-    # Add more devices as needed
-);
-
 # SSH details for the switches
-my $ssh_user = "username";
+my $ssh_user = "Username";
 my $ssh_pass = "password";
 my $enable_pass = "enable_password";
 
-# Hash to store the interfaces per device
-my %device_interfaces = (
-    "10.84.13.9" => ["Gig4/0/48","Gig4/0/47","Gig4/0/46","Gig4/0/45","Gig4/0/44","Gig4/0/43","Gig4/0/42","Gig4/0/41","Gig3/0/48","Gig3/0/47","Gig3/0/46","Gig3/0/45","Gig3/0/44","Gig3/0/43","Gig3/0/42","Gig3/0/41","Gig2/0/48","Gig2/0/47","Gig2/0/46","Gig2/0/45","Gig2/0/44","Gig2/0/43","Gig2/0/42","Gig2/0/41"],
-    "10.84.13.10" => ["Gig2/0/48","Gig2/0/47","Gig2/0/46","Gig2/0/45","Gig2/0/44","Gig2/0/43","Gig2/0/42","Gig2/0/41","Gig1/0/45","Gig1/0/44","Gig1/0/43","Gig1/0/42","Gig1/0/41",],
-    "10.84.13.11" => ["Gig2/0/48","Gig2/0/46","Gig2/0/45","Gig1/0/48","Gig1/0/47","Gig1/0/46","Gig1/0/45","Gig1/0/44","Gig1/0/43",],
-        "10.84.13.12" => ["Gig2/0/48 ", "Gig1/0/47", "Gig1/0/48", "Gig2/0/47"],
-    # Add more devices and their interfaces as needed
-);
+# Load JSON data from file
+my $json_file = '/specify/path/to/your/switches.json';  # Specify your JSON file path
+my $json_text = read_file($json_file);  # Read JSON file as text
+
+# Parse JSON into a Perl data structure
+my $data = decode_json($json_text);
+
+# Extract device IPs and interfaces from the JSON structure
+my @devices = ();
+my %device_interfaces = ();
+
+foreach my $switch (@{$data->{switches}}) {
+    my $ip = $switch->{ip};
+    push @devices, $ip;
+    $device_interfaces{$ip} = $switch->{interfaces};
+}
 
 # Timestamp file to track the last daily email sent date
-my $timestamp_file = "/tmp/last_email_sent_date2.txt";
+my $timestamp_file = "/tmp/last_email_sent_date13.txt";
 
 # Counter for unreachable devices
 my $unreachable_count = 0;
@@ -53,6 +53,8 @@ my @unreachable_devices;
 
 # Hash to store uptime information for the daily email
 my %uptime_info;
+
+
 
 # Function to send an email
 sub send_email {
@@ -88,71 +90,103 @@ sub format_uptime {
     return sprintf("%d days, %d hours, %d minutes", $days, $hours, $minutes);
 }
 
-# Function to execute SSH commands to shut/no-shut interfaces
 sub execute_ssh_commands {
-    my ($host, $interfaces_ref) = @_;
+    my ($switches_ref, $interfaces_ref) = @_;
 
-    my $ssh = Net::SSH::Expect->new (
-        host => $host,
-        user => $ssh_user,
-        password => $ssh_pass,
-        raw_pty => 1,
-        timeout => 10,
-    );
+    my %actions;  # Hash to track actions for each host
 
-    # Log in
-    my $login_output = $ssh->login();
-    if ($login_output !~ /#/) {
-        die "Login has failed. Login output was: $login_output";
+    # Step 1: Shut down all interfaces on all switches
+    foreach my $host (@$switches_ref) {
+        my @shut_interfaces;
+
+        # Establish SSH connection
+        my $session = Net::SSH2::Cisco->new(host => $host);
+
+        # Login to the device
+        if (!$session->login($ssh_user, $ssh_pass)) {
+            print("Login failed for $host\n");
+            next;  # Skip to the next switch if login fails
+        }
+
+        # Enter enable mode
+        if ($session->enable($enable_pass)) {
+            print "Entered enable mode on $host.\n";
+        } else {
+            die "Failed to enter enable mode on $host: " . $session->errmsg;
+        }
+
+        # Enter configuration mode
+        $session->cmd("conf t");
+
+        # Shut down all interfaces on this switch
+        foreach my $interface (@$interfaces_ref) {
+            $session->cmd("interface $interface");
+	    $session->cmd("shut");
+            $session->cmd("exit");
+            print "Interface $interface on $host has been shut down.\n";
+            push @shut_interfaces, $interface;  # Track shut interfaces
+        }
+
+        # Exit configuration mode
+        $session->cmd("end");
+
+        # Close SSH connection
+        $session->close();
+        print "SSH session to $host closed after shutting down interfaces.\n";
+
+        # Store shut actions
+        $actions{$host}{shut} = \@shut_interfaces;
     }
 
-    # Enter enable mode
-    $ssh->send("enable");
-    my $enable_output = $ssh->waitfor('Password:', 1);
-    if ($enable_output) {
-        $ssh->send($enable_pass);
-        $ssh->waitfor('#', 1) or die "Failed to enter enable mode.";
+    # Step 2: No shut all interfaces on all switches with a delay
+    foreach my $host (@$switches_ref) {
+        my @no_shut_interfaces;
+
+        # Establish SSH connection again
+        my $session = Net::SSH2::Cisco->new(host => $host);
+
+        # Login to the device
+        if (!$session->login($ssh_user, $ssh_pass)) {
+            print("Login failed for $host\n");
+            next;  # Skip to the next switch if login fails
+        }
+
+        # Enter enable mode
+        if ($session->enable($enable_pass)) {
+            print "Entered enable mode on $host.\n";
+        } else {
+            die "Failed to enter enable mode on $host: " . $session->errmsg;
+        }
+
+        # Enter configuration mode
+        $session->cmd("conf t");
+
+        # No shut interfaces with a delay of 10 seconds per interface
+        foreach my $interface (@$interfaces_ref) {
+            $session->cmd("interface $interface");
+	    $session->cmd("no shut");
+            $session->cmd("exit");
+
+            print "Interface $interface on $host has been brought back up.\n";
+            push @no_shut_interfaces, $interface;  # Track no shut interfaces
+            sleep 10;  # Wait for 10 seconds before proceeding to the next interface
+        }
+
+        # Exit configuration mode
+        $session->cmd("end");
+
+        #/>  Close SSH connection
+        $session->close();
+        print "SSH session to $host closed after bringing interfaces back up.\n";
+
+        # Store no shut actions
+        $actions{$host}{no_shut} = \@no_shut_interfaces;
     }
 
-    # Enter configuration mode
-    $ssh->send("conf t");
-    $ssh->waitfor('#', 1) or die "Could not enter configuration mode.";
-
-    # Shut interfaces
-    foreach my $interface (@$interfaces_ref) {
-        $ssh->send("interface $interface");
-        $ssh->waitfor('#', 1) or die "Could not select interface $interface.";
-
-        $ssh->send("shut");
-        $ssh->waitfor('#', 1) or die "Could not shut interface $interface.";
-
-        $ssh->send("exit");
-        $ssh->waitfor('#', 1) or die "Could not exit interface mode.";
-    }
-
-    # No shut interfaces with a delay
-    foreach my $interface (@$interfaces_ref) {
-        $ssh->send("interface $interface");
-        $ssh->waitfor('#', 1) or die "Could not select interface $interface.";
-
-        $ssh->send("no shut");
-        $ssh->waitfor('#', 1) or die "Could not no-shut interface $interface.";
-
-        $ssh->send("exit");
-        $ssh->waitfor('#', 1) or die "Could not exit interface mode.";
-
-        print "Interface $interface on $host has been restarted.\n";
-        sleep 5; # Wait for 5 seconds before proceeding to the next interface
-    }
-
-    # Exit configuration mode
-    $ssh->send("end");
-    $ssh->waitfor('#', 1) or die "Could not exit configuration mode.";
-
-    # Close SSH connection
-    $ssh->close();
-    print "SSH session to $host closed.\n";
+    return \%actions;  # Return the actions performed
 }
+
+
 
 # Function to check uptime and send an alert if necessary
 sub check_uptime {
@@ -178,23 +212,40 @@ sub check_uptime {
     # Save uptime information for daily report
     $uptime_info{$host} = format_uptime($uptime_minutes);
 
-    # Check if uptime is less than 10 minutes
-    if ($uptime_minutes < 10) {
-        # Prepare email body
-        my $body = "The device at $host has an uptime of $uptime_minutes minutes, which is less than the 10 minutes threshold.";
-        send_email($subject, $body);
 
-        # If uptime is less than 5 minutes, perform SSH actions
-        if ($uptime_minutes < 5) {
-            print "Uptime is less than 5 minutes for $host. Executing SSH commands.\n";
-            if (exists $device_interfaces{$host}) {
-                execute_ssh_commands($host, $device_interfaces{$host});
-            } else {
-                print "No interface configuration found for $host. Skipping SSH commands.\n";
+
+
+
+
+if ($uptime_minutes < 10) {
+    print "Uptime is less than 10 minutes for $host. Executing SSH commands.\n";
+    if (exists $device_interfaces{$host}) {
+        # Execute SSH commands and capture the actions performed
+        my $actions = execute_ssh_commands([$host], $device_interfaces{$host});  # Pass $host as an array reference
+
+        # Prepare the email with details of the actions
+        my $action_details = "Details of actions performed on $host:\n";
+        foreach my $switch (keys %$actions) {
+            $action_details .= "Switch: $switch\n";
+
+            # Shut interfaces
+            if (exists $actions->{$switch}{shut}) {
+                $action_details .= "  Shut interfaces: " . join(', ', @{$actions->{$switch}{shut}}) . "\n";
+            }
+
+            # No shut interfaces
+            if (exists $actions->{$switch}{no_shut}) {
+                $action_details .= "  No shut interfaces: " . join(', ', @{$actions->{$switch}{no_shut}}) . "\n";
             }
         }
+
+        # Send email with details
+        send_email("SSH Actions Performed on $host", $action_details);
     } else {
-        print "Uptime for $host is greater than 10 minutes. No alert needed.\n";
+        print "No interface configuration found for $host. Skipping SSH commands.\n";
+    }
+} else {
+print "Uptime for $host is greater than 10 minutes. No alert needed.\n";
     }
 }
 
@@ -204,34 +255,27 @@ sub collect_cdp_info {
     my @ap_info;
 
     # Establish SSH connection
-my $ssh = Net::SSH::Expect->new (
-        host => $host,
-        user => $ssh_user,
+    my $session = Net::SSH2::Cisco->new(
+        host     => $host,
+        user     => $ssh_user,
         password => $ssh_pass,
-        raw_pty => 1,
-        timeout => 10,
     );
 
     # Log in
-    my $login_output = $ssh->login();
-    if ($login_output !~ />/) {
-        die "Login has failed. Login output was: $login_output";
-    }
+    $session->login() or die "Login has failed.";
 
     # Enter enable mode
-    $ssh->send("enable");
-    my $enable_output = $ssh->waitfor('Password:', 1);
-    if ($enable_output) {
-        $ssh->send($enable_pass);
-        $ssh->waitfor('#', 1) or die "Failed to enter enable mode.";
+    if ($session->enable($enable_pass)) {
+        print "Entered enable mode on $host.\n";
+    } else {
+        die "Failed to enter enable mode: " . $session->errmsg;
     }
 
     # Run the "show cdp neighbor detail" command
-    $ssh->send("show cdp neighbor detail");
-    my $output = $ssh->waitfor('#', 1);
+    my @output = $session->cmd('show cdp neighbor detail');
 
     # Split the output into blocks using the dashed lines
-    my @blocks = split /-------------------------/, $output;
+    my @blocks = split /-------------------------/, join('', @output);
 
     # Parse each block for Device ID and IP address
     foreach my $block (@blocks) {
@@ -244,7 +288,7 @@ my $ssh = Net::SSH::Expect->new (
     }
 
     # Close the SSH connection
-    $ssh->close();
+    $session->close();
 
     return @ap_info;
 }
@@ -269,11 +313,10 @@ sub save_to_csv {
 sub send_daily_test_email {
     my $current_date = strftime "%Y-%m-%d", localtime;
 
-
-# Subtrahiere 86400 Sekunden (1 Tag) von der aktuellen Zeit
+    # Subtract 86400 seconds (1 day) from the current time
     my $yesterday_time = time() - 86400;
 
-# Formatierung des Datums
+    # Format the date
     my $yesterday_date = strftime "%Y-%m-%d", localtime($yesterday_time);
 
     print "Yesterday's date: $yesterday_date\n";
@@ -315,9 +358,6 @@ if (-e $timestamp_file) {
 
 # Get current date
 my $current_date = strftime "%Y-%m-%d", localtime;
-
-
-
 
 # Check uptime for each device
 foreach my $device (@devices) {
